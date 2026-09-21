@@ -1,0 +1,26 @@
+{
+  "name": "gaza-prayer-times-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "بوت واتساب يرسل تنبيهات مواقيت الصلاة لمجموعات محددة (غزة، فلسطين) ويعمل مجاناً عبر GitHub Actions",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "node src/index.js --dry-run",
+    "login": "node scripts/login.js",
+    "groups": "node scripts/groups.js",
+    "test-send": "node scripts/test-send.js",
+    "preview": "node scripts/preview.js",
+    "pack-session": "node scripts/session.js pack",
+    "unpack-session": "node scripts/session.js unpack"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "luxon": "^3.7.2",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

@@ -1,0 +1,7 @@
+# لا ترفع هذه الملفات أبداً إلى GitHub
+node_modules/
+.env
+data/
+session.enc
+session-store/
+*.log

@@ -1,0 +1,109 @@
+# ==============================================================================
+#  بوت مواقيت الصلاة — تشغيل مستمر عبر GitHub Actions
+#
+#  كيف يتغلب على قيود GitHub Actions؟
+#  ─────────────────────────────────
+#  1) الحدّ الأقصى للـ job الواحد = 6 ساعات، فنشغّل البوت ~5 س و35 د ثم "يسلّم"
+#     لنسخة جديدة تبدأ مباشرة (الخطوة الأخيرة تشغّل الـ workflow نفسه بـ workflow_dispatch).
+#  2) الـ cron في GitHub غير دقيق (قد يتأخر دقائق) — لذلك لا نعتمد عليه لموعد الصلاة.
+#     البوت يبقى متصلاً ويرسل في الثانية المضبوطة. الـ cron هنا مجرد "حارس"
+#     يعيد التشغيل إن انقطعت السلسلة لأي سبب.
+#  3) `concurrency` يمنع تشغيل نسختين معاً (نسختان بنفس الجلسة = تعارض وقد يفصل الجهاز).
+#     النسخة التالية تنتظر في الطابور حتى تنتهي الحالية.
+#  4) الجلسة تُحفظ مشفّرة (AES-256) في فرع منفصل اسمه session-data،
+#     وتُحدَّث في نهاية كل نسخة حتى تبقى مفاتيح التشفير متزامنة.
+#
+#  المتطلبات: المستودع عام (Public) ليكون وقت التشغيل مجانياً بلا حدّ،
+#  والأسرار مضبوطة: SESSION_PASSPHRASE و GROUP_IDS
+# ==============================================================================
+name: Prayer Times Bot
+
+on:
+  schedule:
+    - cron: '17 */2 * * *' # حارس كل ساعتين (توقيت UTC)
+  workflow_dispatch: # تشغيل يدوي من تبويب Actions
+
+concurrency:
+  group: prayer-bot
+  cancel-in-progress: false # لا نقطع النسخة الجارية؛ الجديدة تنتظر دورها
+
+permissions:
+  contents: write # لدفع الجلسة المشفّرة إلى فرع session-data
+  actions: write #  لتشغيل النسخة التالية
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355 # صمام أمان تحت حدّ الـ 6 ساعات
+
+    steps:
+      # ── 1) كود البوت ────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # ── 2) الجلسة المشفّرة (فرع منفصل) ─────────────────────────────
+      - name: Checkout encrypted session branch
+        uses: actions/checkout@v6
+        with:
+          ref: session-data
+          path: session-store
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: لا نسمح لسكربتات التثبيت في الحزم الخارجية بالتنفيذ (أمان)
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # ── 3) فك تشفير الجلسة (السرّ يُمرَّر لهذه الخطوة فقط) ─────────
+      - name: Decrypt session
+        id: unpack
+        run: node scripts/session.js unpack session-store/session.enc
+        env:
+          SESSION_PASSPHRASE: ${{ secrets.SESSION_PASSPHRASE }}
+
+      # ── 4) تشغيل البوت ─────────────────────────────────────────────
+      - name: Run bot
+        id: bot
+        timeout-minutes: 348 # لو علق البوت لأي سبب تُقطع هذه الخطوة وحدها، فتعمل خطوة حفظ الجلسة بعدها
+        run: node src/index.js
+        env:
+          GROUP_IDS: ${{ secrets.GROUP_IDS }}
+          RUN_MINUTES: '335' # ≈ 5 ساعات و35 دقيقة
+          # إعدادات اختيارية: أنشئها من Settings → Secrets and variables → Actions → Variables
+          PRAYER_METHOD: ${{ vars.PRAYER_METHOD }}
+          PRAYER_SCHOOL: ${{ vars.PRAYER_SCHOOL }}
+          PRAYER_TUNE: ${{ vars.PRAYER_TUNE }}
+          HIJRI_ADJUSTMENT: ${{ vars.HIJRI_ADJUSTMENT }}
+          SHOW_HIJRI: ${{ vars.SHOW_HIJRI }}
+          SEND_WELCOME: ${{ vars.SEND_WELCOME }}
+          WELCOME_VERSION: ${{ vars.WELCOME_VERSION }}
+
+      # ── 5) حفظ الجلسة المحدَّثة (حتى لو فشلت الخطوة السابقة) ───────
+      #  نستبدل الفرع بـ commit وحيد (orphan) حتى لا يتضخم المستودع بالنسخ القديمة
+      - name: Save encrypted session
+        if: ${{ always() && steps.unpack.outcome == 'success' }}
+        env:
+          SESSION_PASSPHRASE: ${{ secrets.SESSION_PASSPHRASE }}
+        run: |
+          node scripts/session.js pack session-store/session.enc
+          cd session-store
+          git config user.name "prayer-bot"
+          git config user.email "prayer-bot@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A
+          git commit -q -m "session snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push --force origin snapshot:session-data
+
+      # ── 6) تشغيل النسخة التالية (فقط إن انتهت هذه بشكل طبيعي) ──────
+      #  إن كان الخروج بسبب تسجيل خروج الجلسة (كود 2) أو تعارض (كود 3)
+      #  فلا نكرر التشغيل؛ يظهر الـ workflow بالأحمر وتصلك رسالة من GitHub.
+      - name: Start next run
+        if: ${{ steps.bot.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run prayer-bot.yml --ref "${{ github.ref_name }}"
